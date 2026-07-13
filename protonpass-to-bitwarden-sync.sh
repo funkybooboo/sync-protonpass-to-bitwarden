@@ -24,27 +24,19 @@ BITWARDEN_BIN="${BITWARDEN_BIN:-bw}"
 DRY_RUN="${DRY_RUN:-false}"
 SKIP_EXISTING="${SKIP_EXISTING:-false}"
 
-# Bitwarden server URL. Defaults to the official cloud server. Set to a
-# self-hosted instance (e.g. a Vaultwarden URL) to target it instead. We
-# run `bw config server` before the auth checks so login/unlock hit the
-# configured instance.
-BW_SERVER="${BW_SERVER:-https://vault.bitwarden.com}"
+# Bitwarden server URL. When set, the script ensures `bw` is pointed at
+# this server before authenticating (skipping the call if `bw` is already
+# configured for it). Leave UNSET to use whatever server `bw` is already
+# configured against -- the script will not touch bw's persisted settings.
+# The .env.example ships a cloud default; set this to a Vaultwarden URL
+# for a self-hosted instance.
+BW_SERVER="${BW_SERVER:-}"
 
 # Return codes used to tally per-item results.
 RC_CREATED=0
 RC_ERROR=1
 RC_SKIPPED=2
 RC_UNSUPPORTED=3
-
-# Colors for output (disabled when not a TTY).
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    NC='\033[0m'
-else
-    RED='' GREEN='' YELLOW='' NC=''
-fi
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -53,9 +45,9 @@ fi
 # stdout so a log of created/skipped items can be piped; warnings and
 # errors go to stderr so they do not pollute that stream.
 # ---------------------------------------------------------------------------
-log_info()  { printf "${GREEN}[INFO]${NC} %s\n" "$*"; }
-log_warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$*" >&2; }
-log_error() { printf "${RED}[ERROR]${NC} %s\n" "$*" >&2; }
+log_info()  { printf '[INFO] %s\n' "$*"; }
+log_warn()  { printf '[WARN] %s\n' "$*" >&2; }
+log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 
 # ---------------------------------------------------------------------------
 # jq filters
@@ -143,9 +135,20 @@ check_deps() {
 }
 
 configure_bitwarden_server() {
-    # Point `bw` at the configured server before any auth/sync calls.
-    # `bw` persists serverUrl in data.json, but we re-issue it each run
-    # so a changed .env takes effect immediately.
+    # If BW_SERVER is unset, leave bw's existing config alone (don't
+    # rewrite data.json). When set, only call `bw config server` if the
+    # current server differs -- makes the run idempotent and avoids
+    # clobbering a self-hosted setup for users who didn't set BW_SERVER.
+    local current
+    current=$("$BITWARDEN_BIN" status 2>/dev/null | jq -r '.serverUrl // empty' 2>/dev/null)
+    if [ -z "$BW_SERVER" ]; then
+        log_info "Bitwarden server: ${current:-<bw default>} (BW_SERVER unset; using bw's existing config)"
+        return 0
+    fi
+    if [ "$current" = "$BW_SERVER" ]; then
+        log_info "Bitwarden server: $BW_SERVER"
+        return 0
+    fi
     if ! "$BITWARDEN_BIN" config server "$BW_SERVER" --quiet >/dev/null 2>&1; then
         log_error "Could not set Bitwarden server to: $BW_SERVER"
         log_error "Run manually: $BITWARDEN_BIN config server '$BW_SERVER'"
@@ -347,27 +350,18 @@ Options:
 Environment variables:
   PROTON_PASS_BIN       pass-cli binary (default: pass-cli)
   BITWARDEN_BIN         bw binary (default: bw)
-  BW_SERVER             Bitwarden server URL (default: https://vault.bitwarden.com).
-                        Set to a self-hosted/Vaultwarden URL to target it instead.
-                        The script runs `bw config server "$BW_SERVER"` before
-                        authenticating.
+  BW_SERVER             Bitwarden server URL. Set to a self-hosted/Vaultwarden URL
+                        to target it (the script runs `bw config server` then).
+                        Unset to leave bw's existing server config untouched.
+                        .env.example ships the cloud default
+                        (https://vault.bitwarden.com).
   DRY_RUN               Set to "true" for dry-run mode (same as --dry-run)
   SKIP_EXISTING         Set to "true" to skip existing (same as --skip-existing)
 
-Prerequisites:
-  - Proton Pass CLI installed and logged in:
-        curl -fsSL https://proton.me/download/pass-cli/install.sh | bash
-        pass-cli login
-  - Bitwarden CLI installed, logged in, and unlocked:
-        npm install -g @bitwarden/cli
-        bw login
-        bw unlock        # prints: export BW_SESSION="..."
-        export BW_SESSION="..."   # then re-run this script
-    To target a self-hosted instance (e.g. Vaultwarden), set the server first:
-        bw config server https://vaultwarden.example.com
-        bw login you@example.com
-        bw sync
-  - jq installed.
+Prerequisites (see README for full setup):
+  pass-cli (Proton Pass CLI) installed, logged in.
+  bw (Bitwarden CLI) installed, logged in, and unlocked (BW_SESSION exported).
+  jq installed.
 
 Supported Proton Pass item types:
   login, note, credit-card -> recreated as Bitwarden items.
@@ -397,7 +391,7 @@ done
 # Run
 # ---------------------------------------------------------------------------
 log_info "Proton Pass -> Bitwarden sync"
-log_info "Dry run: $DRY_RUN | Skip existing: $SKIP_EXISTING | Server: $BW_SERVER"
+log_info "Dry run: $DRY_RUN | Skip existing: $SKIP_EXISTING | Server: ${BW_SERVER:-<existing bw config>}"
 echo ""
 
 check_deps

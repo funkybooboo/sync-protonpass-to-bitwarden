@@ -45,9 +45,11 @@ already share a name in Bitwarden.
   The Bitwarden CLI defaults to the official cloud server
   (`https://vault.bitwarden.com`). To target a self-hosted instance
   such as **Vaultwarden**, set `BW_SERVER` in your `.env` (see
-  Configuration) -- the script runs `bw config server "$BW_SERVER"`
-  before authenticating, so a change there takes effect on the next
-  run.
+  Configuration) -- the script runs `bw config server` to point `bw`
+  at it before authenticating, but only when the current server differs,
+  so it is safe to leave set. Leave `BW_SERVER` unset to use whatever
+  server `bw` is already configured against; the script will not touch
+  `bw`'s persisted config.
 
   For a one-time manual setup instead:
 
@@ -90,7 +92,7 @@ set -a; source .env; set +a
 | --- | --- | --- |
 | `PROTON_PASS_BIN` | `pass-cli` | Path to the Proton Pass CLI binary. |
 | `BITWARDEN_BIN` | `bw` | Path to the Bitwarden CLI binary. |
-| `BW_SERVER` | `https://vault.bitwarden.com` | Bitwarden server URL. Set to a self-hosted/Vaultwarden URL to target it instead. |
+| `BW_SERVER` | *(unset)* | Bitwarden server URL. When set, the script runs `bw config server` to point `bw` at it (skipped if already matched). Set to a Vaultwarden URL for self-hosted; unset to leave `bw`'s existing config untouched. `.env.example` ships the cloud default (`https://vault.bitwarden.com`). |
 | `DRY_RUN` | `false` | `true` previews without writing (same as `--dry-run`). |
 | `SKIP_EXISTING` | `false` | `true` skips name-matched items (same as `--skip-existing`). |
 | `BW_SESSION` | *(unset)* | Bitwarden unlock session key from `bw unlock`. |
