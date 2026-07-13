@@ -1,0 +1,2 @@
+# Local environment file (contains BW_SESSION secrets if filled in)
+.env
