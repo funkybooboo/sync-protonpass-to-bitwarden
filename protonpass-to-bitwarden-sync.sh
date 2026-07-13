@@ -101,8 +101,8 @@ log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 EF='((.content.extra_fields // []) | map({name: .name, value: (.content.Text // .content.Hidden // ""), type: (if (.content | has("Hidden")) then 1 else 0 end)}))'
 
 # Proton Custom "sections[].section_fields[]" flattened to custom fields
-# (prefixed with the section name), plus item-level extra_fields.
-CF='([.content.content.Custom.sections[]? | . as $s | .section_fields[]? | {name: ($s.section_name + " / " + .name), value: (.content.Text // .content.Hidden // ""), type: (if (.content | has("Hidden")) then 1 else 0 end)}] + ((.content.extra_fields // []) | map({name: .name, value: (.content.Text // .content.Hidden // ""), type: (if (.content | has("Hidden")) then 1 else 0 end)})))'
+# (prefixed with the section name), plus item-level extra_fields (EF).
+CF='([.content.content.Custom.sections[]? | . as $s | .section_fields[]? | {name: ($s.section_name + " / " + .name), value: (.content.Text // .content.Hidden // ""), type: (if (.content | has("Hidden")) then 1 else 0 end)}] + ('"$EF"'))'
 
 # folderId: empty string -> null (Bitwarden "No Folder"); else the id.
 FID='folderId: (if $folderId == "" then null else $folderId end),'
@@ -148,17 +148,9 @@ CARD_FILTER='.content.content.CreditCard as $c | {
   }
 }'
 
-# Alias content is `null` in Proton's export -- the alias email itself
-# is not exposed, only the title (the site it was used on) and note. We
-# preserve both in a Secure Note and carry any extra_fields.
-ALIAS_FILTER='{
-  type: 2,
-  name: .content.title,
-  notes: .content.note,
-  '"$FID"'
-  fields: ('"$EF"'),
-  secureNote: { type: 0 }
-}'
+# Alias content is `null` in Proton's export -- the alias email itself is
+# not exposed, only the title (site used) and note. It maps to the same
+# shape as a Note, so filter_for_type reuses NOTE_FILTER for Alias.
 
 # Identity: map Proton fields onto the Bitwarden identity slots, and put
 # every Proton field with no BW slot into custom fields so nothing is
@@ -353,19 +345,21 @@ get_proton_items() {
 # ---------------------------------------------------------------------------
 ensure_folder() {
     # Resolve (creating if needed) a Bitwarden folder matching the Proton
-    # vault name. Result is cached in FOLDER_IDS[num]. Returns 0 on
+    # vault name. Result is cached in FOLDER_IDS[name]. Returns 0 on
     # success (id may be empty if creation failed -- item gets no folder).
     local name=$1
     [ -n "${FOLDER_IDS[$name]+set}" ] && return 0
+    # In dry-run we don't touch bw (it may not be logged in); preview as
+    # "would create" with an empty id so items land in No Folder.
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would create folder: $name"
+        FOLDER_IDS[$name]=""
+        return 0
+    fi
     local id
     id=$("$BITWARDEN_BIN" list folders 2>/dev/null \
         | jq -r --arg n "$name" '.[]? | select(.name == $n) | .id' 2>/dev/null | head -1)
     if [ -z "$id" ] || [ "$id" = "null" ]; then
-        if [ "$DRY_RUN" = true ]; then
-            log_info "[DRY RUN] Would create folder: $name"
-            FOLDER_IDS[$name]=""
-            return 0
-        fi
         id=$(jq -rn --arg n "$name" '{name:$n}' | "$BITWARDEN_BIN" encode 2>/dev/null \
             | "$BITWARDEN_BIN" create folder 2>/dev/null | jq -r '.id // empty' 2>/dev/null)
     fi
@@ -390,7 +384,7 @@ filter_for_type() {
         Login)      printf '%s' "$LOGIN_FILTER" ;;
         Note)       printf '%s' "$NOTE_FILTER" ;;
         CreditCard) printf '%s' "$CARD_FILTER" ;;
-        Alias)      printf '%s' "$ALIAS_FILTER" ;;
+        Alias)      printf '%s' "$NOTE_FILTER" ;;   # same shape as Note
         Identity)   printf '%s' "$IDENTITY_FILTER" ;;
         SshKey)     printf '%s' "$SSHKEY_FILTER" ;;
         Wifi)       printf '%s' "$WIFI_FILTER" ;;
@@ -442,7 +436,8 @@ process_item() {
         return "$RC_SKIPPED"
     fi
 
-    # Every Proton variant now has a mapping.
+    # All known Proton variants have a mapping. The fallback counts any
+    # future type as unsupported (logged) rather than silently dropping it.
     case "$variant" in
         Login|Note|CreditCard|Alias|Identity|SshKey|Wifi|Custom) ;;
         *)
