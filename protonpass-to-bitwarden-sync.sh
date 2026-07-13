@@ -341,6 +341,10 @@ Prerequisites:
         bw login
         bw unlock        # prints: export BW_SESSION="..."
         export BW_SESSION="..."   # then re-run this script
+    To target a self-hosted instance (e.g. Vaultwarden), set the server first:
+        bw config server https://vaultwarden.example.com
+        bw login you@example.com
+        bw sync
   - jq installed.
 
 Supported Proton Pass item types:

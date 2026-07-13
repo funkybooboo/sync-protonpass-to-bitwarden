@@ -42,6 +42,24 @@ already share a name in Bitwarden.
   export BW_SESSION="..."   # then re-run the sync script
   ```
 
+  The Bitwarden CLI defaults to the official cloud server
+  (`bitwarden.com`). To target a self-hosted instance such as
+  **Vaultwarden**, set the server before logging in:
+
+  ```sh
+  bw config server https://vaultwarden.example.com
+  bw login you@example.com
+  bw sync
+  ```
+
+  This persists `serverUrl` in `~/.config/Bitwarden CLI/data.json`, so
+  subsequent `bw login` / `bw unlock` / sync calls hit your instance.
+  Use the same email and master password that exist on that server.
+  Vaultwarden requires HTTPS (the CLI refuses plain HTTP) -- use a
+  reverse proxy with a valid certificate. If your instance enforces
+  2FA, the CLI will prompt for the code the same as the web vault.
+  To switch back to the cloud later: `bw config server` (no url).
+
 - **jq** -- <https://jqlang.github.io/jq/>.
 
   ```sh
@@ -127,6 +145,9 @@ not treated as matches.
   fields are not carried over.
 - **Skipped types** (alias, identity, ssh-key, wifi, custom) are logged but
   not transferred -- there is no clean Bitwarden equivalent for these.
+- **Self-hosted servers** (Vaultwarden) are fully supported -- just run
+  `bw config server <url>` before `bw login` (see Prerequisites). This
+  script makes no assumption about which server `bw` is pointed at.
 
 ## License
 
