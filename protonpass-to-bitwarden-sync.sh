@@ -24,6 +24,12 @@ BITWARDEN_BIN="${BITWARDEN_BIN:-bw}"
 DRY_RUN="${DRY_RUN:-false}"
 SKIP_EXISTING="${SKIP_EXISTING:-false}"
 
+# Bitwarden server URL. Defaults to the official cloud server. Set to a
+# self-hosted instance (e.g. a Vaultwarden URL) to target it instead. We
+# run `bw config server` before the auth checks so login/unlock hit the
+# configured instance.
+BW_SERVER="${BW_SERVER:-https://vault.bitwarden.com}"
+
 # Return codes used to tally per-item results.
 RC_CREATED=0
 RC_ERROR=1
@@ -134,6 +140,18 @@ check_deps() {
         missing=1
     fi
     [ "$missing" -eq 0 ] || exit 1
+}
+
+configure_bitwarden_server() {
+    # Point `bw` at the configured server before any auth/sync calls.
+    # `bw` persists serverUrl in data.json, but we re-issue it each run
+    # so a changed .env takes effect immediately.
+    if ! "$BITWARDEN_BIN" config server "$BW_SERVER" --quiet >/dev/null 2>&1; then
+        log_error "Could not set Bitwarden server to: $BW_SERVER"
+        log_error "Run manually: $BITWARDEN_BIN config server '$BW_SERVER'"
+        exit 1
+    fi
+    log_info "Bitwarden server: $BW_SERVER"
 }
 
 check_proton_pass_auth() {
@@ -329,6 +347,10 @@ Options:
 Environment variables:
   PROTON_PASS_BIN       pass-cli binary (default: pass-cli)
   BITWARDEN_BIN         bw binary (default: bw)
+  BW_SERVER             Bitwarden server URL (default: https://vault.bitwarden.com).
+                        Set to a self-hosted/Vaultwarden URL to target it instead.
+                        The script runs `bw config server "$BW_SERVER"` before
+                        authenticating.
   DRY_RUN               Set to "true" for dry-run mode (same as --dry-run)
   SKIP_EXISTING         Set to "true" to skip existing (same as --skip-existing)
 
@@ -375,10 +397,11 @@ done
 # Run
 # ---------------------------------------------------------------------------
 log_info "Proton Pass -> Bitwarden sync"
-log_info "Dry run: $DRY_RUN | Skip existing: $SKIP_EXISTING"
+log_info "Dry run: $DRY_RUN | Skip existing: $SKIP_EXISTING | Server: $BW_SERVER"
 echo ""
 
 check_deps
+configure_bitwarden_server
 check_proton_pass_auth
 check_bitwarden_auth
 

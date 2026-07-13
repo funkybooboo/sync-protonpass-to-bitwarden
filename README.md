@@ -43,8 +43,13 @@ already share a name in Bitwarden.
   ```
 
   The Bitwarden CLI defaults to the official cloud server
-  (`bitwarden.com`). To target a self-hosted instance such as
-  **Vaultwarden**, set the server before logging in:
+  (`https://vault.bitwarden.com`). To target a self-hosted instance
+  such as **Vaultwarden**, set `BW_SERVER` in your `.env` (see
+  Configuration) -- the script runs `bw config server "$BW_SERVER"`
+  before authenticating, so a change there takes effect on the next
+  run.
+
+  For a one-time manual setup instead:
 
   ```sh
   bw config server https://vaultwarden.example.com
@@ -85,6 +90,7 @@ set -a; source .env; set +a
 | --- | --- | --- |
 | `PROTON_PASS_BIN` | `pass-cli` | Path to the Proton Pass CLI binary. |
 | `BITWARDEN_BIN` | `bw` | Path to the Bitwarden CLI binary. |
+| `BW_SERVER` | `https://vault.bitwarden.com` | Bitwarden server URL. Set to a self-hosted/Vaultwarden URL to target it instead. |
 | `DRY_RUN` | `false` | `true` previews without writing (same as `--dry-run`). |
 | `SKIP_EXISTING` | `false` | `true` skips name-matched items (same as `--skip-existing`). |
 | `BW_SESSION` | *(unset)* | Bitwarden unlock session key from `bw unlock`. |
