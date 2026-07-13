@@ -4,25 +4,31 @@ One-way sync / migration of items from **Proton Pass** to **Bitwarden**.
 
 The script reads every vault in your Proton Pass account via the
 [Proton Pass CLI](https://github.com/ProtonPass/pass-cli) (`pass-cli`) and
-recreates supported items as equivalent items in your Bitwarden vault via the
-[Bitwarden CLI](https://bitwarden.com/help/cli/) (`bw`).
+recreates every item as its closest equivalent in your Bitwarden vault via the
+[Bitwarden CLI](https://bitwarden.com/help/cli/) (`bw`). Proton Pass vaults
+are mirrored as Bitwarden folders, and Proton Pass `extra_fields` / Custom
+`sections` are carried over as Bitwarden custom fields.
 
 This is a **create-only** tool: it never modifies or deletes existing
 Bitwarden items. Use `--skip-existing` to avoid duplicating items that
-already share a name in Bitwarden.
+already share a name in Bitwarden. By default only **Active** (non-trashed)
+Proton items are synced; pass `--include-trashed` to also copy trashed items.
 
-## Supported item types
+## Item type mapping
 
 | Proton Pass type | Bitwarden item | Notes |
 | --- | --- | --- |
-| login | Login (type 1) | username (falls back to email), password, URLs, TOTP URI |
+| login | Login (type 1) | username (falls back to email), password, URLs, TOTP URI. **Passkeys are not migrated** (see Limitations). |
 | note | Secure Note (type 2) | note body -> `notes` |
 | credit-card | Card (type 3) | cardholder, number, CVC, expiry (split `MM/YY` -> month/year) |
-| alias | -- | skipped (no BW mapping) |
-| identity | -- | skipped (no BW mapping) |
-| ssh-key | -- | skipped (no BW mapping) |
-| wifi | -- | skipped (no BW mapping) |
-| custom | -- | skipped (no BW mapping) |
+| identity | Identity (type 4) | known fields -> BW slots; the rest -> custom fields (nothing is lost) |
+| alias | Secure Note (type 2) | Proton does not expose the alias email; the title (site used) and note are preserved |
+| ssh-key | SSH Key (type 8) | private + public key |
+| wifi | Secure Note (type 2) | SSID / Security / Password as custom fields |
+| custom | Secure Note (type 2) | Custom `sections` are folded into custom fields (prefixed `section / field`) |
+
+All Proton Pass **vaults become Bitwarden folders** (created on demand), and all
+**`extra_fields`** become Bitwarden custom fields (`Hidden` -> hidden, `Text` -> text).
 
 ## Prerequisites
 
@@ -93,8 +99,9 @@ set -a; source .env; set +a
 | `PROTON_PASS_BIN` | `pass-cli` | Path to the Proton Pass CLI binary. |
 | `BITWARDEN_BIN` | `bw` | Path to the Bitwarden CLI binary. |
 | `BW_SERVER` | *(unset)* | Bitwarden server URL. When set, the script runs `bw config server` to point `bw` at it (skipped if already matched). Set to a Vaultwarden URL for self-hosted; unset to leave `bw`'s existing config untouched. `.env.example` ships the cloud default (`https://vault.bitwarden.com`). |
-| `DRY_RUN` | `false` | `true` previews without writing (same as `--dry-run`). |
+| `DRY_RUN` | `false` | `true` previews without writing (same as `--dry-run`). Dry-run skips the Bitwarden server/auth/sync steps, so `bw` need not be logged in. |
 | `SKIP_EXISTING` | `false` | `true` skips name-matched items (same as `--skip-existing`). |
+| `INCLUDE_TRASHED` | `false` | `true` also syncs trashed Proton items (same as `--include-trashed`). |
 | `BW_SESSION` | *(unset)* | Bitwarden unlock session key from `bw unlock`. |
 
 `.env` is gitignored -- only `.env.example` is tracked.
@@ -102,7 +109,7 @@ set -a; source .env; set +a
 ## Usage
 
 ```sh
-# Preview what would be created (recommended first run)
+# Preview what would be created (recommended first run; bw need not be logged in)
 ./protonpass-to-bitwarden-sync.sh --dry-run
 
 # Create only items not already present in Bitwarden
@@ -110,15 +117,19 @@ set -a; source .env; set +a
 
 # Full sync (may create duplicates of existing items)
 ./protonpass-to-bitwarden-sync.sh
+
+# Also include items Proton has moved to Trash
+./protonpass-to-bitwarden-sync.sh --include-trashed
 ```
 
 ```
 Usage: protonpass-to-bitwarden-sync.sh [OPTIONS]
 
 Options:
-  -d, --dry-run         Show what would be created without writing anything.
-  -s, --skip-existing   Skip items whose name already matches a Bitwarden item.
-  -h, --help            Show this help message.
+  -d, --dry-run           Show what would be created without writing.
+  -s, --skip-existing     Skip items whose name already matches a Bitwarden item.
+  -t, --include-trashed   Also sync trashed Proton items (default: active only).
+  -h, --help              Show this help message.
 ```
 
 ### How name matching works
@@ -130,32 +141,45 @@ not treated as matches.
 
 ## How it works
 
-1. `pass-cli vault list --output json` enumerates vaults (`{name, vault_id,
-   share_id}`).
-2. For each vault, `pass-cli item list --share-id <id> --output json
-   --show-secrets` returns every item including secret material.
-3. The item's type is detected from the `content.content` variant key
-   (`Login`, `Note`, `CreditCard`, ...).
-4. A `jq` filter transforms the Proton Pass item into a Bitwarden item object.
-   Secrets flow straight from `jq` into `bw encode | bw create item` and
-   **never pass through shell variables**, so passwords containing newlines or
-   quotes are preserved.
-5. Summary counters (created / skipped / unsupported / errors) are printed at
+1. `bw sync` refreshes the Bitwarden local cache (so pre-existing folders and
+   `--skip-existing` lookups are current).
+2. `pass-cli vault list --output json` enumerates vaults
+   (`{name, vault_id, share_id}`). Each vault name maps to a Bitwarden
+   folder, created on demand via `bw create folder` if it does not already
+   exist (`bw list folders` caches the folder id for the run).
+3. For each vault, `pass-cli item list --share-id <id> --filter-state active
+   --output json --show-secrets` returns every active item including secret
+   material (`--include-trashed` drops the state filter).
+4. The item's type is detected from the `content.content` variant key
+   (`Login`, `Note`, `CreditCard`, `Alias`, `Identity`, `SshKey`, `Wifi`,
+   `Custom`).
+5. A `jq` filter transforms the Proton Pass item into a Bitwarden item object
+   (with `folderId` and `fields`). Secrets flow straight from `jq` into
+   `bw encode | bw create item` and **never pass through shell variables**,
+   so passwords containing newlines or quotes are preserved.
+6. Summary counters (created / skipped / unsupported / errors) are printed at
    the end.
 
-## Caveats
+## Limitations
 
+- **Passkeys are not migrated.** Proton Pass stores passkeys as CBOR
+  credential blobs that `bw create item` cannot ingest; the login migrates
+  (user/password/TOTP/URLs), but its passkey attachment does not. No data is
+  lost -- it remains in Proton Pass; re-add the passkey from a browser if
+  needed.
+- **SSH keys require a server that supports item type 8** (Bitwarden cloud
+  and current Vaultwarden do). Servers that predate SSH-key support will fail
+  that item with a counted error.
+- **`platform_specific` / allowed-apps** have no Bitwarden equivalent and
+  are dropped.
+- **Identity / Credit-card / Wifi** field names are mapped from Proton Pass's
+  documented schemas (verified via `pass-cli item create <type>
+  --get-template`). If Proton renames a field, the affected value lands in
+  `notes`/custom fields rather than its native slot -- it is never lost.
+- **Folder, not collection.** Proton vaults map to Bitwarden *folders*
+  (personal organization), not to organization *collections*.
 - **Create-only.** No updates, no deletes. Re-running without
   `--skip-existing` will create duplicates.
-- **No folder / collection mapping.** All items land in the default
-  Bitwarden collection (`folderId: null`).
-- **No custom-field migration.** Proton Pass `extra_fields` and identity
-  fields are not carried over.
-- **Skipped types** (alias, identity, ssh-key, wifi, custom) are logged but
-  not transferred -- there is no clean Bitwarden equivalent for these.
-- **Self-hosted servers** (Vaultwarden) are fully supported -- just run
-  `bw config server <url>` before `bw login` (see Prerequisites). This
-  script makes no assumption about which server `bw` is pointed at.
 
 ## License
 
