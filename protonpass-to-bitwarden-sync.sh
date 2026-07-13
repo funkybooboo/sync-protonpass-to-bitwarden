@@ -42,9 +42,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # Logging
+#
+# All output goes to stdout/stderr only -- never to a file. Info goes to
+# stdout so a log of created/skipped items can be piped; warnings and
+# errors go to stderr so they do not pollute that stream.
 # ---------------------------------------------------------------------------
 log_info()  { printf "${GREEN}[INFO]${NC} %s\n" "$*"; }
-log_warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$*"; >&2; }
+log_warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$*" >&2; }
 log_error() { printf "${RED}[ERROR]${NC} %s\n" "$*" >&2; }
 
 # ---------------------------------------------------------------------------
