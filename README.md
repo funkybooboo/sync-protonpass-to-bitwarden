@@ -48,6 +48,23 @@ All Proton Pass **vaults become Bitwarden folders** (created on demand), and all
   pass-cli login
   ```
 
+  **Headless / container hosts:** `pass-cli` stores its local database
+  encryption key in the OS keyring (kernel keyutils by default on Linux),
+  which is **not available inside LXC/Docker** -- the first command fails
+  with `NoStorageAccess` / `Error creating client features`. Set
+  `PROTON_PASS_KEY_PROVIDER=fs` so it stores the key as a file instead:
+
+  ```sh
+  pass-cli logout --force 2>/dev/null
+  PROTON_PASS_KEY_PROVIDER=fs pass-cli login
+  ```
+
+  Add `PROTON_PASS_KEY_PROVIDER=fs` to your `.env` (it's in `.env.example`,
+  commented) so the sync script and cron have it set on every run. The key
+  file lands at `~/.local/share/proton-pass-cli/.session/local.key` (mode
+  0600) and persists across reboots. See the Proton docs on key storage
+  backends for the full tradeoff.
+
 - **Bitwarden CLI** -- installed:
 
   ```sh
@@ -116,6 +133,7 @@ exported environment value to take precedence.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PROTON_PASS_BIN` | `pass-cli` | Path to the Proton Pass CLI binary. |
+| `PROTON_PASS_KEY_PROVIDER` | *(unset)* | Proton Pass local-key backend. Set to `fs` on headless/container hosts (LXC/Docker) where the kernel keyring is unavailable; see Prerequisites. |
 | `BITWARDEN_BIN` | `bw` | Path to the Bitwarden CLI binary. |
 | `BW_SERVER` | *(unset)* | Bitwarden server URL. When set, the script runs `bw config server` to point `bw` at it (skipped if already matched). Set to a Vaultwarden URL for self-hosted; unset to leave `bw`'s existing config untouched. `.env.example` ships the cloud default (`https://vault.bitwarden.com`). |
 | `BW_SESSION` | *(unset)* | Bitwarden unlock session key. **Optional** -- if unset and the vault is locked, the script runs `bw unlock --raw` interactively and keeps the session for the run only. |

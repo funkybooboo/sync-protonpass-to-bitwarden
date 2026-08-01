@@ -306,9 +306,15 @@ configure_bitwarden_server() {
 }
 
 check_proton_pass_auth() {
-    if ! "$PROTON_PASS_BIN" test >/dev/null 2>&1; then
-        log_error "Not logged into Proton Pass (or connection failed)."
+    # There is no `pass-cli test` subcommand; use `vault list` (the same call
+    # get_proton_vaults relies on) as the auth + connection probe. On a
+    # headless/containers machine that hit the keyring error at install time,
+    # PROTON_PASS_KEY_PROVIDER=fs must be set (the script gets it from .env) so
+    # pass-cli can read its local database encryption key from disk.
+    if ! "$PROTON_PASS_BIN" vault list --output json >/dev/null 2>&1; then
+        log_error "Not logged into Proton Pass (or connection / key provider failed)."
         log_error "Run: $PROTON_PASS_BIN login"
+        log_error "On headless/container hosts also set: PROTON_PASS_KEY_PROVIDER=fs"
         exit 1
     fi
     log_info "Proton Pass: authenticated"
