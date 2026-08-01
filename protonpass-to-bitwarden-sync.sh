@@ -570,7 +570,19 @@ process_item() {
     # All known Proton variants have a mapping. The fallback counts any
     # future type as unsupported (logged) rather than silently dropping it.
     case "$variant" in
-        Login|Note|CreditCard|Alias|Identity|SshKey|Wifi|Custom) ;;
+        Login|Note|CreditCard|Alias|Identity|Wifi|Custom) ;;
+        SshKey)
+            # Bitwarden SSH-key items are type 8. The current @bitwarden/cli
+            # (verified 2026.6.0) fails to create them against Vaultwarden
+            # with a crypto error ("decryption operation failed") while every
+            # other type works -- a CLI/server incompatibility, not bad data.
+            # Reclassify as Unsupported so the run stays green and the key is
+            # NOT lost: it remains in Proton Pass. Flip this off (move SshKey
+            # back into the known list) once a CLI/Vaultwarden combo supports
+            # type 8.
+            log_warn "Skipping SSH key (type 8 not creatable via current bw CLI + Vaultwarden): $title"
+            return "$RC_UNSUPPORTED"
+            ;;
         *)
             log_warn "Skipping unknown type '$variant': $title"
             return "$RC_UNSUPPORTED"

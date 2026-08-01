@@ -221,9 +221,14 @@ updating it.
   directly in Bitwarden, the next run overwrites it with the Proton value.
   Proton Pass is the source of truth. Use `--skip-existing` for items you
   curate in Bitwarden.
-- **SSH keys require a server that supports item type 8** (Bitwarden cloud
-  and current Vaultwarden do). Servers that predate SSH-key support will fail
-  that item with a counted error.
+- **SSH keys are reclassified as Unsupported** (counted, not erroring).
+  The current `@bitwarden/cli` (verified 2026.6.0) fails to create type-8
+  (SSH Key) items against Vaultwarden with a crypto error (`decryption
+  operation failed`) while every other item type works -- a CLI/server
+  incompatibility, not bad input. The key is **not lost**: it remains in
+  Proton Pass. The script logs `Skipping SSH key (...)` and counts it under
+  `Unsupported`. Flip the `SshKey` branch in `process_item` back into the
+  known list once a CLI/Vaultwarden combo supports type 8.
 - **`platform_specific` / allowed-apps** have no Bitwarden equivalent and
   are dropped.
 - **Identity / Credit-card / Wifi** field names are mapped from Proton Pass's
