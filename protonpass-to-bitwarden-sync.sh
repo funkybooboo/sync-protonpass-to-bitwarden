@@ -42,6 +42,7 @@ set -uo pipefail
 for _d in \
     /usr/local/bin /usr/bin /bin \
     /usr/local/sbin /usr/sbin /sbin \
+    /root/.local/bin /root/.cargo/bin \
     "$HOME/.local/bin" "$HOME/.cargo/bin" \
     /opt/homebrew/bin /usr/local/share/npm-global/bin ; do
     [ -d "$_d" ] && case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
