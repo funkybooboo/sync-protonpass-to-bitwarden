@@ -33,6 +33,23 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
+# PATH hardening for non-interactive runners (cron, cronmaster UI, systemd)
+# ---------------------------------------------------------------------------
+# Minimal-PATH runners (cron, `sh -c bash ...`) often don't include the dirs
+# where pass-cli, bw, jq, and sendmail live. Prepend the common install
+# locations so `command -v` in check_deps() finds them without relying on a
+# login shell. Dirs that don't exist are skipped.
+for _d in \
+    /usr/local/bin /usr/bin /bin \
+    /usr/local/sbin /usr/sbin /sbin \
+    "$HOME/.local/bin" "$HOME/.cargo/bin" \
+    /opt/homebrew/bin /usr/local/share/npm-global/bin ; do
+    [ -d "$_d" ] && case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
+unset _d
+
+# ---------------------------------------------------------------------------
 # .env auto-load (the script is bash; you never source .env by hand)
 # ---------------------------------------------------------------------------
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
