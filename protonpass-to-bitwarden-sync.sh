@@ -10,11 +10,14 @@
 # folders, and Proton "extra fields" / custom "sections" are carried over
 # as Bitwarden custom fields.
 #
-# This is a CREATE-ONLY tool. It never modifies or deletes existing
-# Bitwarden items. Use --skip-existing to avoid duplicating items that
-# already share a name in Bitwarden. By default only Active (non-trashed)
-# Proton items are synced; pass --include-trashed to also copy trashed
-# items.
+# By default this is an UPSERT sync (Proton Pass is the source of truth):
+# a Bitwarden item with the exact same name in the same folder is UPDATED
+# in place to match Proton; items not yet in Bitwarden are CREATED. This
+# keeps re-runs idempotent (no duplicates) at the cost of overwriting any
+# Bitwarden-side edits to the synced fields. Pass --skip-existing to
+# leave existing items untouched (create-only-when-new). The script never
+# deletes Bitwarden items. By default only Active (non-trashed) Proton
+# items are synced; pass --include-trashed to also copy trashed items.
 #
 # Known limitations (data is never lost -- it stays in Proton Pass):
 #   - Passkeys: Proton stores them as CBOR credential blobs that `bw
@@ -28,6 +31,29 @@
 # We use -uo pipefail (not -e): the counting logic relies on per-item
 # return codes from functions, and errexit would make that fragile.
 set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# .env auto-load (the script is bash; you never source .env by hand)
+# ---------------------------------------------------------------------------
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+load_env() {
+    # Sources the project .env on startup so configuration works from any
+    # shell (bash, fish, zsh) -- you never source .env yourself. Values in
+    # .env take effect; a variable already exported in the environment will
+    # be overwritten by .env, so leave a value commented out in .env to let
+    # an exported environment value win.
+    local f envfile
+    for f in "$SCRIPT_DIR/.env" "$PWD/.env"; do
+        [ -f "$f" ] && envfile="$f" && break
+    done
+    [ -n "$envfile" ] || return 0
+    set -a
+    # shellcheck disable=SC1090
+    source "$envfile"
+    set +a
+}
+load_env
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -51,6 +77,7 @@ RC_CREATED=0
 RC_ERROR=1
 RC_SKIPPED=2
 RC_UNSUPPORTED=3
+RC_UPDATED=4
 
 # folder name -> folder id cache (populated lazily by ensure_folder).
 declare -A FOLDER_IDS=()
@@ -287,26 +314,50 @@ check_proton_pass_auth() {
     log_info "Proton Pass: authenticated"
 }
 
+bw_status() {
+    # Returns the Bitwarden status string ("" if unreadable).
+    "$BITWARDEN_BIN" status 2>/dev/null | jq -r '.status // empty' 2>/dev/null
+}
+
+# Interactively log in to Bitwarden (handles email/2FA prompts).
+bw_login_interactive() {
+    log_info "Bitwarden: not logged in -- running '$BITWARDEN_BIN login' (interactive)."
+    "$BITWARDEN_BIN" login
+}
+
+# Unlock the vault and keep the session key for this run only.
+# Uses `bw unlock --raw` (prints just the session key, no export wrapper).
+bw_unlock_interactive() {
+    log_info "Bitwarden: vault locked -- running '$BITWARDEN_BIN unlock' (enter master password)."
+    local session
+    session=$("$BITWARDEN_BIN" unlock --raw 2>/dev/null)
+    if [ -z "$session" ]; then
+        log_error "Unlock failed. Run '$BITWARDEN_BIN unlock' manually to check."
+        return 1
+    fi
+    export BW_SESSION="$session"
+    log_info "Bitwarden: vault unlocked (session kept for this run only)"
+}
+
 check_bitwarden_auth() {
     local status
-    status=$("$BITWARDEN_BIN" status 2>/dev/null | jq -r '.status // empty' 2>/dev/null)
+    status=$(bw_status)
     if [ -z "$status" ]; then
         log_error "Could not read Bitwarden status. Is '$BITWARDEN_BIN' working?"
         exit 1
     fi
+
+    if [ "$status" = "unauthenticated" ]; then
+        bw_login_interactive || { log_error "Bitwarden login failed."; exit 1; }
+        status=$(bw_status)
+    fi
+    if [ "$status" = "locked" ]; then
+        bw_unlock_interactive || exit 1
+        status=$(bw_status)
+    fi
     case "$status" in
-        unauthenticated)
-            log_error "Not logged into Bitwarden. Run: $BITWARDEN_BIN login"
-            exit 1 ;;
-        locked)
-            log_error "Bitwarden vault is locked. Run: $BITWARDEN_BIN unlock"
-            log_error "then export BW_SESSION as printed and re-run this script."
-            exit 1 ;;
-        unlocked)
-            log_info "Bitwarden: vault unlocked" ;;
-        *)
-            log_error "Unknown Bitwarden status: $status"
-            exit 1 ;;
+        unlocked) log_info "Bitwarden: vault unlocked" ;;
+        *) log_error "Unexpected Bitwarden status after auth: ${status:-<empty>}"; exit 1 ;;
     esac
 }
 
@@ -372,11 +423,20 @@ ensure_folder() {
     return 0
 }
 
-bitwarden_item_exists() {
-    # Returns rc 0 if a Bitwarden item with an exact-name match exists.
-    local name=$1
-    "$BITWARDEN_BIN" list items --search "$name" 2>/dev/null \
-        | jq -e --arg name "$name" 'any((. // [])[]; .name == $name)' >/dev/null 2>&1
+bitwarden_find_item_id() {
+    # Returns (prints, no newline) the Bitwarden item id whose name matches
+    # $1 exactly AND whose folderId matches $2 (empty $2 matches a null
+    # folderId -- i.e. "No Folder"). Empty output means no match. If more
+    # than one item matches, the first is used and a warning is logged.
+    local name=$1 folder_id=$2 matches count
+    matches=$("$BITWARDEN_BIN" list items --search "$name" 2>/dev/null \
+        | jq --arg name "$name" --arg fid "$folder_id" \
+            '[.[]? | select(.name == $name and (($fid == "" and (.folderId == null)) or (.folderId == $fid)))]')
+    count=$(printf '%s' "$matches" | jq -r 'length' 2>/dev/null)
+    if [ "${count:-0}" -gt 1 ] 2>/dev/null; then
+        log_warn "Multiple Bitwarden items named '$name' in this folder; updating the first."
+    fi
+    printf '%s' "$matches" | jq -r '.[0].id // empty' 2>/dev/null
 }
 
 filter_for_type() {
@@ -415,6 +475,37 @@ create_bitwarden_item() {
     return "$RC_ERROR"
 }
 
+update_bitwarden_item() {
+    # $1 = existing BW item id, $2 = variant, $3 = title, $4 = folder id,
+    # $5 = Proton item JSON. Merges the Proton-derived fields onto the
+    # existing BW item (preserving id / organizationId / collectionIds /
+    # favorite / revisionDate and existing login keys Proton does not
+    # provide, e.g. a BW-side passkey) and writes it back with
+    # `bw edit item`. Proton Pass is the source of truth for the mapped
+    # fields; Bitwarden-side edits to those same fields are overwritten.
+    local id=$1 variant=$2 title=$3 folder_id=$4 item=$5
+    local filter existing new merged
+    filter=$(filter_for_type "$variant") || { log_error "No filter for $variant"; return "$RC_ERROR"; }
+
+    existing=$("$BITWARDEN_BIN" get item "$id" 2>/dev/null)
+    if [ -z "$existing" ]; then
+        log_error "Failed to read existing item for update: $title"
+        return "$RC_ERROR"
+    fi
+
+    new=$(printf '%s' "$item" | jq -c --arg folderId "$folder_id" "$filter")
+    # Deep-merge: existing keeps its id/org/collections/favorite/revisionDate
+    # and any login keys absent from the Proton object; Proton fields override.
+    merged=$(printf '%s' "$existing" | jq -c --argjson n "$new" '. * $n')
+
+    if printf '%s' "$merged" | "$BITWARDEN_BIN" encode | "$BITWARDEN_BIN" edit item "$id" >/dev/null 2>&1; then
+        log_info "Updated $variant: $title"
+        return "$RC_UPDATED"
+    fi
+    log_error "Failed to update: $title"
+    return "$RC_ERROR"
+}
+
 # ---------------------------------------------------------------------------
 # Per-item processing
 # ---------------------------------------------------------------------------
@@ -450,9 +541,22 @@ process_item() {
     ensure_folder "$vault" || true
     folder_id="${FOLDER_IDS[$vault]:-}"
 
-    if [ "$SKIP_EXISTING" = true ] && bitwarden_item_exists "$title"; then
-        log_info "Skipping existing: $title"
-        return "$RC_SKIPPED"
+    # Dry-run cannot query Bitwarden (bw may be unconfigured), so preview
+    # every item as a "would create".
+    if [ "$DRY_RUN" = true ]; then
+        create_bitwarden_item "$variant" "$title" "$folder_id" "$item"
+        return $?
+    fi
+
+    local existing_id
+    existing_id=$(bitwarden_find_item_id "$title" "$folder_id")
+    if [ -n "$existing_id" ]; then
+        if [ "$SKIP_EXISTING" = true ]; then
+            log_info "Skipping existing: $title"
+            return "$RC_SKIPPED"
+        fi
+        update_bitwarden_item "$existing_id" "$variant" "$title" "$folder_id" "$item"
+        return $?
     fi
 
     create_bitwarden_item "$variant" "$title" "$folder_id" "$item"
@@ -464,7 +568,7 @@ process_item() {
 sync_vaults() {
     log_info "Starting sync from Proton Pass to Bitwarden..."
 
-    local total=0 created=0 skipped=0 unsupported=0 errors=0
+    local total=0 created=0 updated=0 skipped=0 unsupported=0 errors=0
     local vault share_id share_name items
 
     while IFS= read -r vault; do
@@ -490,6 +594,7 @@ sync_vaults() {
             process_item "$share_name" "$item"; rc=$?
             case "$rc" in
                 "$RC_CREATED")     created=$((created + 1)) ;;
+                "$RC_UPDATED")     updated=$((updated + 1)) ;;
                 "$RC_SKIPPED")     skipped=$((skipped + 1)) ;;
                 "$RC_UNSUPPORTED") unsupported=$((unsupported + 1)) ;;
                 "$RC_ERROR")       errors=$((errors + 1)) ;;
@@ -501,6 +606,7 @@ sync_vaults() {
     log_info "Sync complete"
     log_info "  Total items:  $total"
     log_info "  Created:      $created"
+    log_info "  Updated:      $updated"
     log_info "  Skipped:      $skipped"
     log_info "  Unsupported:  $unsupported"
     log_info "  Errors:       $errors"
@@ -515,15 +621,18 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Sync (create-only) items from Proton Pass to Bitwarden. Every Proton item
-type is mapped to its closest Bitwarden equivalent, Proton vaults become
-Bitwarden folders, and Proton extra_fields / Custom sections become
-Bitwarden custom fields.
+Upsert (sync) items from Proton Pass to Bitwarden -- Proton Pass is the
+source of truth. Existing Bitwarden items with the same name in the same
+folder are UPDATED in place to match Proton; new items are CREATED. Every
+Proton item type is mapped to its closest Bitwarden equivalent, Proton
+vaults become Bitwarden folders, and Proton extra_fields / Custom sections
+become Bitwarden custom fields.
 
 Options:
   -d, --dry-run           Show what would be created, including the
                             generated Bitwarden item JSON, without writing.
-  -s, --skip-existing     Skip items whose name already matches a BW item.
+  -s, --skip-existing     Leave existing items untouched (no updates, no
+                            duplicates; create new items only).
   -t, --include-trashed   Also sync trashed Proton items (default: active
                             items only).
   -h, --help              Show this help message.
@@ -539,6 +648,11 @@ Environment variables:
   DRY_RUN             "true" = dry-run mode (same as --dry-run).
   SKIP_EXISTING       "true" = skip existing (same as --skip-existing).
   INCLUDE_TRASHED     "true" = include trashed (same as --include-trashed).
+  BW_SESSION          Bitwarden session key. Optional: if the vault is
+                        locked the script unlocks it interactively and keeps
+                        the session for this run only.
+
+  ./.env is auto-loaded on startup (no need to source it yourself).
 
 Prerequisites (see README for full setup):
   pass-cli (Proton Pass CLI) installed and logged in.
@@ -557,14 +671,17 @@ Type mapping:
   Custom     -> Bitwarden Secure Note (sections folded into custom fields)
 
 Notes:
-  - CREATE-ONLY: never modifies or deletes existing Bitwarden items.
-  - Name matching for --skip-existing is exact and case-sensitive.
+  - UPSERT: existing items (same name, same folder) are updated to match
+    Proton; items not present are created. Never deletes. Proton-side edits
+    to mapped fields overwrite Bitwarden-side edits on the next run. Use
+    --skip-existing to never update existing items.
+  - Name matching is exact and case-sensitive, within the same folder.
   - Trashed Proton items are skipped unless --include-trashed is set.
 
 Examples:
-  $0 --dry-run            # preview what would be created
-  $0 --skip-existing      # create only items not already in BW
-  $0                      # full sync (may create duplicates)
+  $0 --dry-run            # preview what would be created (bw not required)
+  $0                      # sync: update existing, create new (default)
+  $0 --skip-existing      # create new items only; leave existing untouched
 EOF
 }
 
