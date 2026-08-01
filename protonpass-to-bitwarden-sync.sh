@@ -332,8 +332,15 @@ bw_login_interactive() {
 }
 
 # Unlock the vault and keep the session key for this run only.
-# Uses `bw unlock --raw` (prints just the session key, no export wrapper).
+# Uses `bw unlock --raw` (prints just the session key, no export wrapper). Only
+# attempted when a TTY is attached; in a non-interactive context (cron) this
+# would hang forever waiting for a master password, so we fail loudly instead.
 bw_unlock_interactive() {
+    if [ ! -t 0 ]; then
+        log_error "Bitwarden vault is locked and no TTY is attached (non-interactive run)."
+        log_error "Refresh BW_SESSION in .env with: bw unlock --raw"
+        return 1
+    fi
     log_info "Bitwarden: vault locked -- running '$BITWARDEN_BIN unlock' (enter master password)."
     local session
     session=$("$BITWARDEN_BIN" unlock --raw 2>/dev/null)
