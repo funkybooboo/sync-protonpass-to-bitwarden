@@ -496,13 +496,17 @@ create_bitwarden_item() {
         return "$RC_CREATED"
     fi
 
-    if printf '%s' "$item" | jq -c --arg folderId "$folder_id" "$filter" \
+    local out rc
+    out=$(printf '%s' "$item" | jq -c --arg folderId "$folder_id" "$filter" \
         | "$BITWARDEN_BIN" encode \
-        | "$BITWARDEN_BIN" create item >/dev/null 2>&1; then
+        | "$BITWARDEN_BIN" create item 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         log_info "Created $variant: $title"
         return "$RC_CREATED"
     fi
     log_error "Failed to create: $title"
+    log_error "  bw create item output: $(printf '%s' "$out" | head -c 2000)"
     return "$RC_ERROR"
 }
 
@@ -529,11 +533,16 @@ update_bitwarden_item() {
     # and any login keys absent from the Proton object; Proton fields override.
     merged=$(printf '%s' "$existing" | jq -c --argjson n "$new" '. * $n')
 
-    if printf '%s' "$merged" | "$BITWARDEN_BIN" encode | "$BITWARDEN_BIN" edit item "$id" >/dev/null 2>&1; then
+    local out rc
+    out=$(printf '%s' "$merged" | "$BITWARDEN_BIN" encode \
+        | "$BITWARDEN_BIN" edit item "$id" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         log_info "Updated $variant: $title"
         return "$RC_UPDATED"
     fi
     log_error "Failed to update: $title"
+    log_error "  bw edit item output: $(printf '%s' "$out" | head -c 2000)"
     return "$RC_ERROR"
 }
 
